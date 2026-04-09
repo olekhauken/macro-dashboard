@@ -194,18 +194,33 @@ class MarketFetcher(BaseFetcher):
             or has too few rows to compute changes.
         """
         # ---- Select the "Close" column for this ticker ----
-        # When multiple tickers are downloaded, the DataFrame has a two-level
-        # column index: (field, ticker). We need to navigate to (Close, symbol).
+        # yfinance 1.x changed the MultiIndex column order:
+        #   Old (<=0.2.x): (field, ticker)  → raw["Close"]["^GSPC"]
+        #   New (>=1.0.0): (ticker, field)  → raw["^GSPC"]["Close"]
         # When only one ticker is downloaded the column index is flat: just the field.
         if num_symbols == 1:
             # Single-ticker download: flat column index
             close = raw["Close"]
+        elif raw.columns.nlevels == 2:
+            # Multi-ticker download: detect column order by checking level 0 values.
+            # If level 0 contains ticker symbols (e.g. "^GSPC"), it's the new 1.x format.
+            level0_values = raw.columns.get_level_values(0).unique().tolist()
+            new_format = any(v in level0_values for v in ["^GSPC", "^IXIC", "^VIX", symbol])
+            if new_format:
+                # yfinance 1.x: (ticker, field)
+                if symbol not in raw.columns.get_level_values(0):
+                    logger.warning("Symbol %s not found in downloaded data.", symbol)
+                    return None
+                close = raw[symbol]["Close"]
+            else:
+                # yfinance 0.x: (field, ticker)
+                if symbol not in raw.columns.get_level_values(1):
+                    logger.warning("Symbol %s not found in downloaded data.", symbol)
+                    return None
+                close = raw["Close"][symbol]
         else:
-            # Multi-ticker download: hierarchical column index
-            if symbol not in raw.columns.get_level_values(1):
-                logger.warning("Symbol %s not found in downloaded data.", symbol)
-                return None
-            close = raw["Close"][symbol]
+            logger.warning("Unexpected DataFrame structure for %s.", symbol)
+            return None
 
         # Drop any rows where the close price is NaN (market holidays, weekends).
         close = close.dropna()
