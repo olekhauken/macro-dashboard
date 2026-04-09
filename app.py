@@ -674,10 +674,19 @@ def update_chart(selected_tickers: list[str], period: str) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Start
+# Start scheduler (kjøres både ved direkte kjøring og via gunicorn)
 # ---------------------------------------------------------------------------
+# Vi starter scheduleren her på modulnivå, ikke bare i __main__-blokken.
+# Årsak: gunicorn importerer app.py som et modul (kaller ikke __main__),
+# så alt som kun lå i if __name__ == "__main__": ble aldri kjørt på Railway.
+# Med --workers 1 i Procfile er det kun én worker-prosess, så scheduleren
+# startes kun én gang – ingen risiko for dupliserte jobber.
+sched.start()
+
+# Sørg for at data/store/-mappen eksisterer på Railway (ephemeral filesystem)
+Path("data/store").mkdir(parents=True, exist_ok=True)
+
 if __name__ == "__main__":
-    sched.start()
     port = int(os.environ.get("PORT", 8050))
     logger.info("Starting Dash app on port %d", port)
     app.run(host="0.0.0.0", port=port, debug=False)

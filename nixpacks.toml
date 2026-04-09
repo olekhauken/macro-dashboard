@@ -1,9 +1,0 @@
-# nixpacks.toml
-# Forteller Railway (Nixpacks build system) hvordan den skal bygge appen.
-# Se: https://nixpacks.com/docs/configuration/file
-
-[phases.build]
-cmds = ["pip install -r requirements.txt"]
-
-[start]
-cmd = "gunicorn app:server --bind 0.0.0.0:$PORT --workers 1 --timeout 120"
