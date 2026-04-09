@@ -1,0 +1,15 @@
+# Core dashboard framework
+dash==2.18.1               # Plotly Dash – web framework for building interactive dashboards
+plotly==5.24.1             # Charting library used by Dash
+
+# Data fetching
+yfinance==0.2.51           # Yahoo Finance API wrapper – used for stock/index price data
+
+# Scheduling
+apscheduler==3.10.4        # Advanced Python Scheduler – runs daily data-fetch jobs
+
+# Data processing
+pandas==2.2.3              # DataFrame library – all data manipulation goes through here
+
+# Web server (for Railway deployment)
+gunicorn==23.0.0           # Production WSGI server (Dash runs on Flask under the hood)
