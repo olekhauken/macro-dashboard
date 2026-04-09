@@ -80,8 +80,20 @@ def start() -> BackgroundScheduler:
     scheduler.start()
     logger.info("Scheduler started. Next run: %s", scheduler.get_job("daily_market_fetch").next_run_time)
 
-    # Kjør én gang umiddelbart ved oppstart hvis data er gammel eller mangler.
-    _fetch_if_stale()
+    # Kjør en engangssjekk 5 sekunder etter oppstart som en egen jobb.
+    # Hvorfor ikke kalle _fetch_if_stale() direkte her?
+    # → _fetch_if_stale() kaller yf.download() som tar 10–20 sek og blokkerer
+    #   gunicorn-oppstarten. Railway tolker dette som at appen henger og dreper
+    #   prosessen. Ved å legge det inn som en "date"-jobb starter gunicorn
+    #   umiddelbart, og datahentingen skjer i bakgrunnen 5 sek etterpå.
+    from datetime import datetime, timedelta
+    scheduler.add_job(
+        _fetch_if_stale,
+        trigger="date",
+        run_date=datetime.now() + timedelta(seconds=5),
+        id="startup_fetch",
+        replace_existing=True,
+    )
 
     return scheduler
 
