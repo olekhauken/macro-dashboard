@@ -22,6 +22,7 @@ Du kan også kjøre en engangsinnhenting direkte:
 """
 
 import logging
+import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 
 logger = logging.getLogger(__name__)
@@ -80,20 +81,16 @@ def start() -> BackgroundScheduler:
     scheduler.start()
     logger.info("Scheduler started. Next run: %s", scheduler.get_job("daily_market_fetch").next_run_time)
 
-    # Kjør en engangssjekk 5 sekunder etter oppstart som en egen jobb.
-    # Hvorfor ikke kalle _fetch_if_stale() direkte her?
-    # → _fetch_if_stale() kaller yf.download() som tar 10–20 sek og blokkerer
-    #   gunicorn-oppstarten. Railway tolker dette som at appen henger og dreper
-    #   prosessen. Ved å legge det inn som en "date"-jobb starter gunicorn
-    #   umiddelbart, og datahentingen skjer i bakgrunnen 5 sek etterpå.
-    from datetime import datetime, timedelta
-    scheduler.add_job(
-        _fetch_if_stale,
-        trigger="date",
-        run_date=datetime.now() + timedelta(seconds=5),
-        id="startup_fetch",
-        replace_existing=True,
-    )
+    # Start oppstartshenting i en vanlig Python-tråd – ikke via APScheduler.
+    # Hvorfor ikke APScheduler "date"-jobb?
+    # → APScheduler sammenligner run_date med sin interne klokke (timezone-aware).
+    #   Railway kjører i UTC, men datetime.now() uten tzinfo er naiv (ingen tz).
+    #   Med timezone="Europe/Oslo" (UTC+2) tror APScheduler jobben er 2 timer
+    #   forsinket og dropper den umiddelbart.
+    # En daemon-tråd starter umiddelbart i bakgrunnen og har ingen timezone-logikk.
+    t = threading.Thread(target=_fetch_if_stale, daemon=True, name="startup-fetch")
+    t.start()
+    logger.info("Startup fetch thread launched.")
 
     return scheduler
 
