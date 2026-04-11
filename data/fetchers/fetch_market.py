@@ -66,8 +66,11 @@ logger = logging.getLogger(__name__)
 # Each entry: (ticker_symbol, human_readable_label)
 # ---------------------------------------------------------------------------
 OSLO_BORS_TICKERS = [
-    ("^OSEBX", "Oslo Børs – OSEBX"),
-    ("^OBX",   "Oslo Børs – OBX 25"),
+    # ^OSEBX og ^OBX (med ^) finnes ikke i Yahoo Finance.
+    # OBX.OL er Oslo Børs OBX-indeksen direkte på Yahoo Finance (uten ^).
+    # EQNR.OL er Equinor – Norges største selskap og tung vekt i OBX.
+    ("OBX.OL",   "Oslo Børs – OBX 25"),
+    ("EQNR.OL",  "Equinor (EQNR)"),
 ]
 
 GLOBAL_INDEX_TICKERS = [

@@ -25,6 +25,11 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 
+# numpy må importeres før scheduler-tråden starter. Plotly og yfinance
+# bruker begge numpy, og hvis de importeres parallelt (main thread + scheduler
+# thread) kan Python gi "partially initialized module"-feil.
+import numpy as np  # noqa: F401 – pre-import for å unngå race condition
+
 import dash
 from dash import Input, Output, callback, dcc, html
 import plotly.graph_objects as go
@@ -141,8 +146,8 @@ def make_kpi_card(entry: dict) -> html.Div:
             "border":        f"1px solid {COLORS['card_border']}",
             "borderRadius":  "10px",
             "padding":       "16px 20px",
-            "minWidth":      "170px",
-            "flex":          "1",
+            "width":         "200px",
+            "flex":          "0 0 200px",   # ikke strekk/krymp – alltid 200px
         },
         children=[
             # Tickernavn øverst
@@ -200,8 +205,8 @@ def make_unavailable_card(label: str, ticker: str) -> html.Div:
             "border":       f"1px solid {COLORS['card_border']}",
             "borderRadius": "10px",
             "padding":      "16px 20px",
-            "minWidth":     "170px",
-            "flex":         "1",
+            "width":        "200px",
+            "flex":         "0 0 200px",   # samme faste bredde som make_kpi_card
             "opacity":      "0.5",
         },
         children=[
@@ -427,7 +432,7 @@ def build_layout() -> html.Div:
     data_by_ticker = {e["ticker"]: e for e in market_data}
 
     # Definer hvilke tickers som hører til hvilke seksjoner
-    oslo_tickers   = [("^OSEBX", "Oslo Børs – OSEBX"), ("^OBX", "Oslo Børs – OBX 25")]
+    oslo_tickers   = [("OBX.OL", "Oslo Børs – OBX 25"), ("EQNR.OL", "Equinor (EQNR)")]
     global_tickers = [
         ("^GSPC", "S&P 500"), ("^IXIC", "NASDAQ Composite"), ("^DJI", "Dow Jones"),
         ("^GDAXI", "DAX"),    ("^FTSE", "FTSE 100"),          ("^N225", "Nikkei 225"),
@@ -615,7 +620,7 @@ def build_layout() -> html.Div:
                     # Fotnote
                     html.Div(
                         "Data: Yahoo Finance (EOD) · Indekser normalisert til 100 ved periodens start · "
-                        "OSEBX/OBX kan mangle utenfor norsk åpningstid",
+                        "Oslo Børs representert ved OBX.OL (OBX-indeksen) og EQNR.OL (Equinor)",
                         style={
                             "marginTop":  "16px",
                             "fontSize":   "11px",
