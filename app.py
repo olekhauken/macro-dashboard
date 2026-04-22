@@ -4,18 +4,21 @@ app.py
 Inngangspunktet for macro-dashboard Dash-appen.
 
 Layout-struktur:
-  1. Header            – Tittel + sist oppdatert
-  2. Oslo Børs-seksjon – KPI-kort for OSEBX og OBX øverst
-  3. Globale indekser  – KPI-kort for alle globale indekser
-  4. Annet             – VIX og Brent crude
-  5. Graf-seksjon      – Interaktiv tidsserie med:
-       - Multi-select dropdown for tickers
-       - Tidsfilter (1V / 1M / 3M / 6M / 1Y)
+  1. Header          – Tittel + sist oppdatert
+  2. Indekstabell    – Kompakt klikkbar rad per ticker (e24-stil)
+  3. Detaljpanel     – Vises under tabellen ved radklikk: sparkline + periodvelger
+  4. Sammenlign      – Multi-ticker normalisert graf med tidsfilter
+
+Arkitektur-notat om detaljpanel:
+  Vi bruker ett fast detaljpanel (ikke inline i hver rad) fordi Dash 2.x
+  ikke støtter å erstatte alle barns pattern-matched IDs via ALL-callback
+  uten å krasje layout-lasteren. Detaljpanelet er alltid i DOM-en og
+  oppdateres via callbacks.
 
 Kjøres med:
     python app.py
 
-Eller via gunicorn (Railway):
+Via gunicorn (Railway):
     gunicorn app:server
 """
 
@@ -25,13 +28,9 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 
-# numpy må importeres før scheduler-tråden starter. Plotly og yfinance
-# bruker begge numpy, og hvis de importeres parallelt (main thread + scheduler
-# thread) kan Python gi "partially initialized module"-feil.
-import numpy as np  # noqa: F401 – pre-import for å unngå race condition
-
+import numpy as np   # noqa: F401 – pre-import før scheduler-tråd
 import dash
-from dash import Input, Output, callback, dcc, html
+from dash import ALL, Input, Output, State, callback, dcc, html
 import plotly.graph_objects as go
 
 import scheduler as sched
@@ -47,38 +46,46 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Fargepalett  (brukes konsekvent gjennom hele layoutet)
+# Fargepalett
 # ---------------------------------------------------------------------------
-COLORS = {
-    "bg":           "#0f1117",   # Mørk bakgrunn – hele siden
-    "card_bg":      "#1a1d27",   # Kortbakgrunn
-    "card_border":  "#2a2d3a",   # Kortramme
-    "text_primary": "#e8eaf0",   # Hovedtekst
-    "text_muted":   "#8b8fa8",   # Sekundærtekst / labels
-    "positive":     "#22c55e",   # Grønn – positiv endring
-    "negative":     "#ef4444",   # Rød – negativ endring
-    "neutral":      "#94a3b8",   # Grå – ingen endring / mangler
-    "accent":       "#6366f1",   # Indigo – aksentfarge
-    "chart_bg":     "#141720",   # Grafbakgrunn
+C = {
+    "bg":           "#0f1117",
+    "card":         "#1a1d27",
+    "row_active":   "#1e2235",
+    "border":       "#2a2d3a",
+    "divider":      "#1f2233",
+    "text":         "#e8eaf0",
+    "muted":        "#8b8fa8",
+    "pos":          "#22c55e",
+    "neg":          "#ef4444",
+    "neutral":      "#94a3b8",
+    "chart_bg":     "#141720",
 }
 
-# ---------------------------------------------------------------------------
-# Data-innlesning
-# ---------------------------------------------------------------------------
-STORE_PATH = Path("data/store/market.json")
+TICKER_META = {
+    "OBX.OL":    {"flag": "🇳🇴", "section": "Oslo Børs"},
+    "EQNR.OL":   {"flag": "🇳🇴", "section": "Oslo Børs"},
+    "^GSPC":     {"flag": "🇺🇸", "section": "Globale indekser"},
+    "^IXIC":     {"flag": "🇺🇸", "section": "Globale indekser"},
+    "^DJI":      {"flag": "🇺🇸", "section": "Globale indekser"},
+    "^GDAXI":    {"flag": "🇩🇪", "section": "Globale indekser"},
+    "^FTSE":     {"flag": "🇬🇧", "section": "Globale indekser"},
+    "^N225":     {"flag": "🇯🇵", "section": "Globale indekser"},
+    "000001.SS": {"flag": "🇨🇳", "section": "Globale indekser"},
+    "^VIX":      {"flag": "📊",  "section": "Volatilitet og råvarer"},
+    "BZ=F":      {"flag": "🛢️",  "section": "Volatilitet og råvarer"},
+}
+SECTION_ORDER = ["Oslo Børs", "Globale indekser", "Volatilitet og råvarer"]
+PERIOD_DAYS   = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+STORE_PATH    = Path("data/store/market.json")
 
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
 
 def load_market_data() -> list[dict]:
-    """
-    Les market.json fra disk og returner listen med ticker-dicts.
-
-    Returns
-    -------
-    list[dict]
-        Tom liste hvis filen ikke finnes ennå (første oppstart).
-    """
+    """Les market.json fra disk. Tom liste hvis filen mangler."""
     if not STORE_PATH.exists():
-        logger.warning("market.json ikke funnet – ingen data å vise enda.")
         return []
     try:
         return json.loads(STORE_PATH.read_text(encoding="utf-8"))
@@ -86,609 +93,496 @@ def load_market_data() -> list[dict]:
         logger.error("Feil ved innlesning av market.json: %s", exc)
         return []
 
-
-# ---------------------------------------------------------------------------
-# Hjelpefunksjoner for KPI-kort
-# ---------------------------------------------------------------------------
-
-def fmt_value(value: float, ticker: str) -> str:
-    """
-    Formater en kursverdi passende for visning.
-    VIX og Brent vises med 2 desimaler, indekser med 0 desimaler over 1000.
-    """
-    if value < 100:
-        return f"{value:,.2f}"
-    return f"{value:,.2f}"
-
-
-def make_kpi_card(entry: dict) -> html.Div:
-    """
-    Bygg et KPI-kort for én ticker.
-
-    Kortet viser:
-    - Ticker-navn (label)
-    - Siste kurs
-    - Absolutt endring og prosentvis endring (fargekodet)
-
-    Parameters
-    ----------
-    entry : dict
-        Et kontrakt-dict fra market.json (se base.py).
-
-    Returns
-    -------
-    html.Div
-        Et Dash-HTML-element som representerer KPI-kortet.
-    """
-    last = entry["series"][-1]
-    value = last["value"]
-    change_abs = last["change_abs"]
-    change_pct = last["change_pct"]
-
-    # Velg farge og pil basert på om endringen er positiv eller negativ
-    if change_pct > 0:
-        color = COLORS["positive"]
-        arrow = "▲"
-        sign = "+"
-    elif change_pct < 0:
-        color = COLORS["negative"]
-        arrow = "▼"
-        sign = ""
-    else:
-        color = COLORS["neutral"]
-        arrow = "●"
-        sign = ""
-
-    return html.Div(
-        className="kpi-card",
-        style={
-            "background":    COLORS["card_bg"],
-            "border":        f"1px solid {COLORS['card_border']}",
-            "borderRadius":  "10px",
-            "padding":       "16px 20px",
-            "width":         "200px",
-            "flex":          "0 0 200px",   # ikke strekk/krymp – alltid 200px
-        },
-        children=[
-            # Tickernavn øverst
-            html.Div(
-                entry["label"],
-                style={
-                    "fontSize":   "11px",
-                    "color":      COLORS["text_muted"],
-                    "fontWeight": "600",
-                    "letterSpacing": "0.05em",
-                    "textTransform": "uppercase",
-                    "marginBottom": "8px",
-                    "whiteSpace": "nowrap",
-                    "overflow": "hidden",
-                    "textOverflow": "ellipsis",
-                },
-            ),
-            # Siste kurs (stor tekst)
-            html.Div(
-                fmt_value(value, entry["ticker"]),
-                style={
-                    "fontSize":   "22px",
-                    "fontWeight": "700",
-                    "color":      COLORS["text_primary"],
-                    "marginBottom": "6px",
-                    "letterSpacing": "-0.02em",
-                },
-            ),
-            # Endring (fargekodet)
-            html.Div(
-                style={"display": "flex", "gap": "6px", "alignItems": "center"},
-                children=[
-                    html.Span(
-                        f"{arrow} {sign}{change_pct:.2f}%",
-                        style={"color": color, "fontSize": "13px", "fontWeight": "600"},
-                    ),
-                    html.Span(
-                        f"({sign}{change_abs:,.2f})",
-                        style={"color": COLORS["text_muted"], "fontSize": "12px"},
-                    ),
-                ],
-            ),
-        ],
-    )
-
-
-def make_unavailable_card(label: str, ticker: str) -> html.Div:
-    """
-    Bygg et grået ut KPI-kort for tickers uten tilgjengelige data.
-    Brukes primært for OSEBX og OBX som av og til mangler fra Yahoo Finance.
-    """
-    return html.Div(
-        style={
-            "background":   COLORS["card_bg"],
-            "border":       f"1px solid {COLORS['card_border']}",
-            "borderRadius": "10px",
-            "padding":      "16px 20px",
-            "width":        "200px",
-            "flex":         "0 0 200px",   # samme faste bredde som make_kpi_card
-            "opacity":      "0.5",
-        },
-        children=[
-            html.Div(
-                label,
-                style={
-                    "fontSize": "11px", "color": COLORS["text_muted"],
-                    "fontWeight": "600", "letterSpacing": "0.05em",
-                    "textTransform": "uppercase", "marginBottom": "8px",
-                },
-            ),
-            html.Div(
-                "–",
-                style={"fontSize": "22px", "fontWeight": "700",
-                       "color": COLORS["text_muted"], "marginBottom": "6px"},
-            ),
-            html.Div(
-                "Ikke tilgjengelig",
-                style={"fontSize": "12px", "color": COLORS["text_muted"]},
-            ),
-        ],
-    )
-
-
-def make_section_header(title: str) -> html.Div:
-    """Lager en seksjonstittel med understrek."""
-    return html.Div(
-        title,
-        style={
-            "fontSize":      "11px",
-            "fontWeight":    "700",
-            "color":         COLORS["text_muted"],
-            "letterSpacing": "0.1em",
-            "textTransform": "uppercase",
-            "marginBottom":  "12px",
-            "paddingBottom": "8px",
-            "borderBottom":  f"1px solid {COLORS['card_border']}",
-        },
-    )
-
-
 # ---------------------------------------------------------------------------
 # Graf-hjelpefunksjoner
 # ---------------------------------------------------------------------------
 
-PERIOD_DAYS = {
-    "1W":  7,
-    "1M":  30,
-    "3M":  90,
-    "6M":  180,
-    "1Y":  365,
-}
-
-
-def filter_series_by_period(series: list[dict], period: str) -> list[dict]:
-    """
-    Filtrer en tidsserie til siste N dager basert på valgt periode.
-
-    Parameters
-    ----------
-    series : list[dict]
-        Full tidsserie fra kontrakt-dict.
-    period : str
-        En av "1W", "1M", "3M", "6M", "1Y".
-
-    Returns
-    -------
-    list[dict]
-        Filtrert tidsserie.
-    """
-    days = PERIOD_DAYS.get(period, 365)
-    cutoff = date.today() - timedelta(days=days)
+def filter_by_period(series: list[dict], period: str) -> list[dict]:
+    """Filtrer tidsserie til siste N dager basert på periodkode."""
+    cutoff = date.today() - timedelta(days=PERIOD_DAYS.get(period, 365))
     return [p for p in series if p["date"] >= str(cutoff)]
 
 
-def make_chart(market_data: list[dict], selected_tickers: list[str], period: str) -> go.Figure:
+def _hex_rgba(hex_color: str, alpha: float) -> str:
     """
-    Bygg en interaktiv Plotly-linjegraf for valgte tickers og tidsperiode.
+    Konverter '#rrggbb' til 'rgba(r,g,b,alpha)'.
 
-    For å gjøre det enkelt å sammenligne indekser med svært ulike kursnivåer
-    (f.eks. OSEBX ~1400 vs Nikkei ~38000) normaliseres alle serier til 100
-    ved startpunktet for valgt periode.
-
-    Parameters
-    ----------
-    market_data : list[dict]
-        Alle tilgjengelige ticker-dicts fra market.json.
-    selected_tickers : list[str]
-        Ticker-symboler valgt av brukeren i dropdown.
-    period : str
-        Valgt tidsperiode ("1W", "1M", "3M", "6M", "1Y").
-
-    Returns
-    -------
-    plotly.graph_objects.Figure
+    Plotly aksepterer ikke 8-sifret hex (#rrggbbaa), men vi kan bruke
+    rgba()-strenger for gjennomsiktig fyllefarge i Scatter-grafer.
     """
-    fig = go.Figure()
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
 
-    # Fargesekvens for linjene – bruker en pen blå-til-grønn gradient
-    line_colors = [
-        "#6366f1", "#22c55e", "#f59e0b", "#ef4444",
-        "#06b6d4", "#a855f7", "#f97316", "#84cc16",
-        "#ec4899", "#14b8a6", "#eab308",
-    ]
 
-    added = 0
-    for entry in market_data:
-        if entry["ticker"] not in selected_tickers:
-            continue
+def make_sparkline(entry: dict, period: str = "3M") -> go.Figure:
+    """
+    Kompakt linjegraf for én ticker, vist i detaljpanelet.
 
-        filtered = filter_series_by_period(entry["series"], period)
-        if not filtered:
-            continue
+    Grafen viser absolutt kurs (ikke normalisert) og er laget for
+    å se bra ut i en liten høyde (180px).
+    """
+    filtered = filter_by_period(entry["series"], period)
+    if not filtered:
+        return go.Figure()
 
-        dates  = [p["date"]  for p in filtered]
-        values = [p["value"] for p in filtered]
+    dates  = [p["date"]  for p in filtered]
+    values = [p["value"] for p in filtered]
+    color  = C["pos"] if values[-1] >= values[0] else C["neg"]
 
-        # Normaliser til 100 ved periodens startpunkt slik at ulike indeksnivåer
-        # kan sammenlignes direkte på én akse.
-        base = values[0] if values[0] != 0 else 1
-        normalized = [round(v / base * 100, 4) for v in values]
-
-        fig.add_trace(go.Scatter(
-            x=dates,
-            y=normalized,
-            name=entry["label"],
-            mode="lines",
-            line=dict(
-                color=line_colors[added % len(line_colors)],
-                width=2,
-            ),
-            # Hover viser både normalisert verdi OG faktisk kurs
-            customdata=values,
-            hovertemplate=(
-                "<b>%{fullData.name}</b><br>"
-                "Dato: %{x}<br>"
-                "Indeks (norm.): %{y:.2f}<br>"
-                "Faktisk kurs: %{customdata:,.2f}"
-                "<extra></extra>"
-            ),
-        ))
-        added += 1
-
-    # Horisontal referanselinje ved 100 (startverdi)
-    fig.add_hline(
-        y=100,
-        line_dash="dot",
-        line_color=COLORS["card_border"],
-        line_width=1,
-    )
-
+    fig = go.Figure(go.Scatter(
+        x=dates, y=values,
+        mode="lines",
+        line=dict(color=color, width=2),
+        fill="tozeroy",
+        fillcolor=_hex_rgba(color, 0.08),   # rgba for ~8% gjennomsiktighet
+        hovertemplate="%{x}: <b>%{y:,.2f}</b><extra></extra>",
+    ))
     fig.update_layout(
-        paper_bgcolor=COLORS["chart_bg"],
-        plot_bgcolor=COLORS["chart_bg"],
-        font=dict(family="Inter, system-ui, sans-serif", color=COLORS["text_primary"]),
-        margin=dict(l=50, r=20, t=20, b=40),
-        xaxis=dict(
-            gridcolor=COLORS["card_border"],
-            showgrid=True,
-            zeroline=False,
-            tickfont=dict(size=11, color=COLORS["text_muted"]),
-        ),
-        yaxis=dict(
-            gridcolor=COLORS["card_border"],
-            showgrid=True,
-            zeroline=False,
-            tickfont=dict(size=11, color=COLORS["text_muted"]),
-            ticksuffix="",
-            title=dict(
-                text="Indeksert (start = 100)",
-                font=dict(size=11, color=COLORS["text_muted"]),
-            ),
-        ),
-        legend=dict(
-            bgcolor=COLORS["card_bg"],
-            bordercolor=COLORS["card_border"],
-            borderwidth=1,
-            font=dict(size=11),
-            orientation="h",
-            y=-0.15,
-        ),
-        hovermode="x unified",
+        paper_bgcolor=C["row_active"], plot_bgcolor=C["row_active"],
+        margin=dict(l=48, r=16, t=8, b=28), height=180,
+        xaxis=dict(showgrid=False, zeroline=False,
+                   tickfont=dict(size=10, color=C["muted"])),
+        yaxis=dict(showgrid=True, gridcolor=C["divider"], zeroline=False,
+                   tickfont=dict(size=10, color=C["muted"]), side="right"),
+        hovermode="x unified", showlegend=False,
     )
-
-    if added == 0:
-        fig.add_annotation(
-            text="Velg minst én indeks i dropdown-menyen over",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5,
-            showarrow=False,
-            font=dict(size=14, color=COLORS["text_muted"]),
-        )
-
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Dash-app
-# ---------------------------------------------------------------------------
-app = dash.Dash(
-    __name__,
-    title="Macro Dashboard",
-    suppress_callback_exceptions=True,
-)
-server = app.server   # Eksponert for gunicorn: gunicorn app:server
-
-
-def build_layout() -> html.Div:
-    """
-    Bygg hele dashboardlayouten.
-
-    Layouten leses på nytt ved kall (ikke bare ved oppstart), slik at data
-    fra market.json alltid er fersk når siden lastes.
-
-    Returns
-    -------
-    html.Div
-        Rot-elementet for Dash-appen.
-    """
-    market_data = load_market_data()
-
-    # Lag et oppslagsdikt: ticker → entry (for rask tilgang i KPI-seksjonene)
-    data_by_ticker = {e["ticker"]: e for e in market_data}
-
-    # Definer hvilke tickers som hører til hvilke seksjoner
-    oslo_tickers   = [("OBX.OL", "Oslo Børs – OBX 25"), ("EQNR.OL", "Equinor (EQNR)")]
-    global_tickers = [
-        ("^GSPC", "S&P 500"), ("^IXIC", "NASDAQ Composite"), ("^DJI", "Dow Jones"),
-        ("^GDAXI", "DAX"),    ("^FTSE", "FTSE 100"),          ("^N225", "Nikkei 225"),
-        ("000001.SS", "Shanghai Composite"),
-    ]
-    other_tickers  = [("^VIX", "VIX – Volatility Index"), ("BZ=F", "Brent Crude Oil")]
-
-    def kpi_row(ticker_list: list[tuple]) -> html.Div:
-        """Bygg en rad med KPI-kort for en liste av (ticker, label)-tupler."""
-        cards = []
-        for ticker, label in ticker_list:
-            if ticker in data_by_ticker:
-                cards.append(make_kpi_card(data_by_ticker[ticker]))
-            else:
-                cards.append(make_unavailable_card(label, ticker))
-        return html.Div(
-            cards,
-            style={
-                "display": "flex",
-                "flexWrap": "wrap",
-                "gap": "12px",
-                "marginBottom": "12px",
-            },
+def make_comparison_chart(market_data: list[dict],
+                          selected: list[str], period: str) -> go.Figure:
+    """Normalisert multi-ticker sammenlignsgraf (base = 100 ved periodestart)."""
+    COLORS = ["#6366f1","#22c55e","#f59e0b","#ef4444",
+              "#06b6d4","#a855f7","#f97316","#84cc16",
+              "#ec4899","#14b8a6","#eab308"]
+    fig = go.Figure()
+    added = 0
+    for e in market_data:
+        if e["ticker"] not in selected:
+            continue
+        pts = filter_by_period(e["series"], period)
+        if not pts:
+            continue
+        dates  = [p["date"]  for p in pts]
+        values = [p["value"] for p in pts]
+        base   = values[0] or 1
+        normed = [round(v / base * 100, 4) for v in values]
+        fig.add_trace(go.Scatter(
+            x=dates, y=normed, name=e["label"],
+            mode="lines",
+            line=dict(color=COLORS[added % len(COLORS)], width=2),
+            customdata=values,
+            hovertemplate=(
+                "<b>%{fullData.name}</b><br>Dato: %{x}<br>"
+                "Indeks: %{y:.2f}<br>Kurs: %{customdata:,.2f}<extra></extra>"
+            ),
+        ))
+        added += 1
+    fig.add_hline(y=100, line_dash="dot", line_color=C["border"], line_width=1)
+    fig.update_layout(
+        paper_bgcolor=C["chart_bg"], plot_bgcolor=C["chart_bg"],
+        font=dict(family="Inter, system-ui, sans-serif", color=C["text"]),
+        margin=dict(l=50, r=20, t=20, b=40),
+        xaxis=dict(gridcolor=C["border"], showgrid=True, zeroline=False,
+                   tickfont=dict(size=11, color=C["muted"])),
+        yaxis=dict(gridcolor=C["border"], showgrid=True, zeroline=False,
+                   tickfont=dict(size=11, color=C["muted"]),
+                   title=dict(text="Indeksert (start = 100)",
+                              font=dict(size=11, color=C["muted"]))),
+        legend=dict(bgcolor=C["card"], bordercolor=C["border"], borderwidth=1,
+                    font=dict(size=11), orientation="h", y=-0.15),
+        hovermode="x unified",
+    )
+    if added == 0:
+        fig.add_annotation(
+            text="Velg minst én indeks i dropdown-menyen over",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+            font=dict(size=14, color=C["muted"]),
         )
+    return fig
 
-    # Dropdown-alternativer for grafen – kun tickers med data
-    dropdown_options = [
-        {"label": e["label"], "value": e["ticker"]}
-        for e in market_data
-    ]
+# ---------------------------------------------------------------------------
+# Layout-byggere
+# ---------------------------------------------------------------------------
 
-    # Standardvalg: S&P 500 + OSEBX (hvis tilgjengelig), ellers første to
-    default_selection = []
-    for pref in ["^GSPC", "^OSEBX", "^IXIC"]:
-        if pref in data_by_ticker:
-            default_selection.append(pref)
-        if len(default_selection) == 3:
-            break
-    if not default_selection and market_data:
-        default_selection = [market_data[0]["ticker"]]
+def section_header(title: str) -> html.Div:
+    return html.Div(title, style={
+        "fontSize": "10px", "fontWeight": "700", "color": C["muted"],
+        "letterSpacing": "0.1em", "textTransform": "uppercase",
+        "padding": "12px 20px 6px 20px",
+        "borderBottom": f"1px solid {C['divider']}",
+    })
 
-    # Sist oppdatert-tidsstempel fra første tilgjengelige entry
-    last_updated = ""
-    if market_data:
-        ts = market_data[0].get("last_updated", "")
-        if ts:
-            last_updated = ts[:16].replace("T", " ") + " UTC"
+
+def ticker_row(entry: dict) -> html.Div:
+    """
+    Én klikkbar tabellrad.
+
+    Raden har id={"type":"row","ticker":...} og n_clicks slik at
+    handle_row_click-callbacken kan fange hvilken rad som ble klikket.
+    Selve innholdet er statisk – det er ALDRI skrevet om av en callback,
+    noe som unngår pattern-matched children-feil i Dash 2.x.
+    """
+    t    = entry["ticker"]
+    last = entry["series"][-1]
+    v    = last["value"]
+    chg  = last["change_pct"]
+    abs_ = last["change_abs"]
+    flag = TICKER_META.get(t, {}).get("flag", "🌐")
+    col  = C["pos"] if chg > 0 else (C["neg"] if chg < 0 else C["neutral"])
+    sign = "+" if chg > 0 else ""
+    arr  = "▲" if chg > 0 else ("▼" if chg < 0 else "●")
 
     return html.Div(
+        id={"type": "row", "ticker": t},
+        n_clicks=0,
         style={
-            "background":   COLORS["bg"],
-            "minHeight":    "100vh",
-            "fontFamily":   "Inter, system-ui, sans-serif",
-            "color":        COLORS["text_primary"],
+            "display": "grid",
+            "gridTemplateColumns": "28px 1fr 110px 120px",
+            "alignItems": "center",
+            "padding": "11px 20px",
+            "cursor": "pointer",
+            "gap": "0 8px",
+            "borderBottom": f"1px solid {C['divider']}",
+            "transition": "background 0.12s",
         },
         children=[
-            # ---- Header ----
-            html.Div(
-                style={
-                    "borderBottom": f"1px solid {COLORS['card_border']}",
-                    "padding":      "20px 32px",
-                    "display":      "flex",
-                    "justifyContent": "space-between",
-                    "alignItems":   "center",
-                },
-                children=[
-                    html.Div([
-                        html.H1(
-                            "Macro Dashboard",
-                            style={
-                                "margin": "0", "fontSize": "20px",
-                                "fontWeight": "700", "color": COLORS["text_primary"],
-                                "letterSpacing": "-0.02em",
-                            },
-                        ),
-                        html.Span(
-                            "Børsdata via Yahoo Finance · EOD",
-                            style={"fontSize": "12px", "color": COLORS["text_muted"]},
-                        ),
-                    ]),
-                    html.Div(
-                        f"Oppdatert: {last_updated}" if last_updated else "Ingen data",
-                        style={"fontSize": "12px", "color": COLORS["text_muted"]},
-                    ),
-                ],
-            ),
-
-            # ---- Innhold ----
-            html.Div(
-                style={"padding": "28px 32px"},
-                children=[
-
-                    # Oslo Børs
-                    make_section_header("🇳🇴  Oslo Børs"),
-                    kpi_row(oslo_tickers),
-
-                    # Globale indekser
-                    html.Div(style={"marginTop": "24px"}),
-                    make_section_header("🌍  Globale indekser"),
-                    kpi_row(global_tickers),
-
-                    # Annet
-                    html.Div(style={"marginTop": "24px"}),
-                    make_section_header("📊  Volatilitet og råvarer"),
-                    kpi_row(other_tickers),
-
-                    # Graf
-                    html.Div(style={"marginTop": "32px"}),
-                    make_section_header("📈  Sammenlign indekser"),
-                    html.Div(
-                        style={
-                            "background":    COLORS["card_bg"],
-                            "border":        f"1px solid {COLORS['card_border']}",
-                            "borderRadius":  "12px",
-                            "padding":       "20px 24px",
-                        },
-                        children=[
-                            # Kontroller: dropdown + tidsfilter
-                            html.Div(
-                                style={
-                                    "display":        "flex",
-                                    "gap":            "16px",
-                                    "alignItems":     "center",
-                                    "flexWrap":       "wrap",
-                                    "marginBottom":   "20px",
-                                },
-                                children=[
-                                    # Multi-select ticker dropdown
-                                    html.Div(
-                                        style={"flex": "1", "minWidth": "260px"},
-                                        children=[
-                                            dcc.Dropdown(
-                                                id="ticker-dropdown",
-                                                options=dropdown_options,
-                                                value=default_selection,
-                                                multi=True,
-                                                placeholder="Velg indekser...",
-                                                style={"fontSize": "13px"},
-                                            ),
-                                        ],
-                                    ),
-                                    # Tidsfilter-knapper
-                                    html.Div(
-                                        dcc.RadioItems(
-                                            id="period-radio",
-                                            options=[
-                                                {"label": k, "value": k}
-                                                for k in PERIOD_DAYS
-                                            ],
-                                            value="1Y",
-                                            inline=True,
-                                            inputStyle={"display": "none"},  # Skjul radio-sirkel
-                                            labelStyle={
-                                                "display":       "inline-block",
-                                                "padding":       "5px 14px",
-                                                "marginRight":   "4px",
-                                                "borderRadius":  "6px",
-                                                "border":        f"1px solid {COLORS['card_border']}",
-                                                "cursor":        "pointer",
-                                                "fontSize":      "12px",
-                                                "fontWeight":    "600",
-                                                "color":         COLORS["text_muted"],
-                                                "letterSpacing": "0.03em",
-                                            },
-                                        ),
-                                    ),
-                                ],
-                            ),
-                            # Selve grafen
-                            dcc.Graph(
-                                id="market-chart",
-                                figure=make_chart(market_data, default_selection, "1Y"),
-                                config={
-                                    "displayModeBar": True,
-                                    "modeBarButtonsToRemove": [
-                                        "select2d", "lasso2d", "autoScale2d",
-                                    ],
-                                    "displaylogo": False,
-                                },
-                                style={"height": "420px"},
-                            ),
-                        ],
-                    ),
-
-                    # Fotnote
-                    html.Div(
-                        "Data: Yahoo Finance (EOD) · Indekser normalisert til 100 ved periodens start · "
-                        "Oslo Børs representert ved OBX.OL (OBX-indeksen) og EQNR.OL (Equinor)",
-                        style={
-                            "marginTop":  "16px",
-                            "fontSize":   "11px",
-                            "color":      COLORS["text_muted"],
-                            "textAlign":  "center",
-                        },
-                    ),
-                ],
-            ),
-
-            # dcc.Interval oppdaterer layouten automatisk hvert 5. minutt
-            # (nyttig når appen kjører lenge og markedet er åpent)
-            dcc.Interval(id="refresh-interval", interval=5 * 60 * 1000, n_intervals=0),
+            html.Span(flag, style={"fontSize": "15px"}),
+            html.Span(entry["label"], style={
+                "fontSize": "13px", "color": C["text"], "fontWeight": "500",
+                "overflow": "hidden", "textOverflow": "ellipsis",
+                "whiteSpace": "nowrap",
+            }),
+            html.Span(f"{v:,.2f}", style={
+                "fontSize": "13px", "fontWeight": "600",
+                "color": C["text"], "textAlign": "right",
+                "fontVariantNumeric": "tabular-nums",
+            }),
+            html.Div([
+                html.Span(f"{arr} {sign}{chg:.2f}%",
+                          style={"fontSize": "13px", "fontWeight": "600", "color": col}),
+                html.Span(f"  {sign}{abs_:.2f}",
+                          style={"fontSize": "11px", "color": C["muted"]}),
+            ], style={"textAlign": "right"}),
         ],
     )
 
 
-# Vi bruker en funksjon for layout (ikke et fast objekt) slik at siden
-# re-leser market.json hver gang nettleseren laster siden på nytt.
-app.layout = build_layout
+def table_header() -> html.Div:
+    lbl = lambda t, align="left": html.Span(t, style={   # noqa: E731
+        "fontSize": "10px", "color": C["muted"], "fontWeight": "700",
+        "letterSpacing": "0.08em", "textTransform": "uppercase",
+        "textAlign": align,
+    })
+    return html.Div(style={
+        "display": "grid",
+        "gridTemplateColumns": "28px 1fr 110px 120px",
+        "padding": "8px 20px", "gap": "0 8px",
+        "borderBottom": f"1px solid {C['border']}",
+    }, children=[html.Span(), lbl("Indeks"), lbl("Siste","right"), lbl("Dag +/- %","right")])
 
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+app = dash.Dash(__name__, title="Macro Dashboard",
+                suppress_callback_exceptions=True)
+server = app.server
+
+
+def build_layout() -> html.Div:
+    """
+    Bygg hele layout. Kalles ved hver sideinnlasting (funksjon, ikke objekt)
+    slik at market.json alltid leses fersk.
+    """
+    market_data    = load_market_data()
+    data_by_ticker = {e["ticker"]: e for e in market_data}
+
+    ts = market_data[0].get("last_updated", "")[:16].replace("T", " ") + " UTC" \
+         if market_data else ""
+
+    # Standard valg for sammenlign-grafen
+    default_compare = [t for t in ["^GSPC", "OBX.OL", "^IXIC"]
+                       if t in data_by_ticker] or \
+                      ([market_data[0]["ticker"]] if market_data else [])
+    dropdown_opts = [{"label": e["label"], "value": e["ticker"]}
+                     for e in market_data]
+
+    # Bygg radene gruppert per seksjon
+    rows: list = [table_header()]
+    for sec in SECTION_ORDER:
+        entries = [e for e in market_data
+                   if TICKER_META.get(e["ticker"], {}).get("section") == sec]
+        if not entries:
+            continue
+        rows.append(section_header(sec))
+        for e in entries:
+            rows.append(ticker_row(e))
+
+    period_btn = lambda val: {"label": val, "value": val}   # noqa: E731
+
+    return html.Div(
+        style={"background": C["bg"], "minHeight": "100vh",
+               "fontFamily": "Inter, system-ui, sans-serif", "color": C["text"]},
+        children=[
+            # ── Header ────────────────────────────────────────────────────
+            html.Div(style={
+                "borderBottom": f"1px solid {C['border']}",
+                "padding": "20px 32px",
+                "display": "flex", "justifyContent": "space-between",
+                "alignItems": "center",
+            }, children=[
+                html.Div([
+                    html.H1("Macro Dashboard", style={
+                        "margin": "0", "fontSize": "20px",
+                        "fontWeight": "700", "letterSpacing": "-0.02em",
+                    }),
+                    html.Span("Børsdata via Yahoo Finance · EOD",
+                              style={"fontSize": "12px", "color": C["muted"]}),
+                ]),
+                html.Div(f"Oppdatert: {ts}" if ts else "Ingen data",
+                         style={"fontSize": "12px", "color": C["muted"]}),
+            ]),
+
+            # ── Innhold ───────────────────────────────────────────────────
+            html.Div(style={"padding": "24px 32px", "maxWidth": "900px"}, children=[
+
+                # Indekstabell
+                html.Div(
+                    id="index-table",
+                    style={"background": C["card"], "border": f"1px solid {C['border']}",
+                           "borderRadius": "12px", "overflow": "hidden",
+                           "marginBottom": "0"},
+                    children=rows,
+                ),
+
+                # Detaljpanel – alltid i DOM, vises/skjules via callback
+                html.Div(
+                    id="detail-panel",
+                    style={"background": C["row_active"],
+                           "border": f"1px solid {C['border']}",
+                           "borderTop": "none",
+                           "borderRadius": "0 0 12px 12px",
+                           "padding": "16px 20px",
+                           "display": "none",       # skjult til rad klikkes
+                           "marginBottom": "28px"},
+                    children=[
+                        html.Div(id="detail-title", style={
+                            "fontSize": "13px", "fontWeight": "600",
+                            "color": C["text"], "marginBottom": "10px",
+                        }),
+                        dcc.RadioItems(
+                            id="detail-period",
+                            options=[period_btn(k) for k in PERIOD_DAYS],
+                            value="3M",
+                            inline=True,
+                            inputStyle={"display": "none"},
+                            labelStyle={
+                                "display": "inline-block",
+                                "padding": "3px 10px", "marginRight": "4px",
+                                "borderRadius": "4px",
+                                "border": f"1px solid {C['border']}",
+                                "cursor": "pointer", "fontSize": "11px",
+                                "fontWeight": "600", "color": C["muted"],
+                            },
+                            style={"marginBottom": "8px"},
+                        ),
+                        dcc.Graph(
+                            id="detail-graph",
+                            figure=go.Figure(),
+                            config={"displayModeBar": False},
+                            style={"height": "180px"},
+                        ),
+                    ],
+                ),
+
+                # Sammenlign-seksjon
+                html.Div("📈  SAMMENLIGN INDEKSER", style={
+                    "fontSize": "11px", "fontWeight": "700", "color": C["muted"],
+                    "letterSpacing": "0.1em", "textTransform": "uppercase",
+                    "marginBottom": "12px", "paddingBottom": "8px",
+                    "borderBottom": f"1px solid {C['border']}",
+                }),
+                html.Div(style={
+                    "background": C["card"], "border": f"1px solid {C['border']}",
+                    "borderRadius": "12px", "padding": "20px 24px",
+                }, children=[
+                    html.Div(style={
+                        "display": "flex", "gap": "16px", "alignItems": "center",
+                        "flexWrap": "wrap", "marginBottom": "20px",
+                    }, children=[
+                        html.Div(
+                            dcc.Dropdown(
+                                id="compare-dropdown",
+                                options=dropdown_opts,
+                                value=default_compare,
+                                multi=True,
+                                placeholder="Velg indekser...",
+                                style={"fontSize": "13px"},
+                            ),
+                            style={"flex": "1", "minWidth": "260px"},
+                        ),
+                        dcc.RadioItems(
+                            id="compare-period",
+                            options=[period_btn(k) for k in PERIOD_DAYS],
+                            value="1Y", inline=True,
+                            inputStyle={"display": "none"},
+                            labelStyle={
+                                "display": "inline-block", "padding": "5px 14px",
+                                "marginRight": "4px", "borderRadius": "6px",
+                                "border": f"1px solid {C['border']}",
+                                "cursor": "pointer", "fontSize": "12px",
+                                "fontWeight": "600", "color": C["muted"],
+                            },
+                        ),
+                    ]),
+                    dcc.Graph(
+                        id="compare-chart",
+                        figure=make_comparison_chart(market_data, default_compare, "1Y"),
+                        config={"displayModeBar": True,
+                                "modeBarButtonsToRemove": ["select2d","lasso2d"],
+                                "displaylogo": False},
+                        style={"height": "420px"},
+                    ),
+                ]),
+
+                html.Div(
+                    "Data: Yahoo Finance (EOD) · Oslo Børs: OBX.OL og EQNR.OL",
+                    style={"marginTop": "16px", "fontSize": "11px",
+                           "color": C["muted"], "textAlign": "center"},
+                ),
+            ]),
+
+            # State
+            dcc.Store(id="active-ticker", data=None),
+            dcc.Interval(id="refresh-interval", interval=5*60*1000, n_intervals=0),
+        ],
+    )
+
+
+app.layout = build_layout
 
 # ---------------------------------------------------------------------------
 # Callbacks
 # ---------------------------------------------------------------------------
 
 @callback(
-    Output("market-chart", "figure"),
-    Input("ticker-dropdown", "value"),
-    Input("period-radio",    "value"),
+    Output("active-ticker", "data"),
+    Input({"type": "row", "ticker": ALL}, "n_clicks"),
+    State("active-ticker", "data"),
     prevent_initial_call=True,
 )
-def update_chart(selected_tickers: list[str], period: str) -> go.Figure:
+def handle_row_click(all_clicks, current):
     """
-    Oppdater grafen når brukeren velger andre tickers eller tidsperiode.
-
-    Kalles automatisk av Dash når input-verdiene endres.
-
-    Parameters
-    ----------
-    selected_tickers : list[str]
-        Ticker-symboler valgt i dropdown (f.eks. ["^GSPC", "^IXIC"]).
-    period : str
-        Valgt tidsperiode ("1W", "1M", "3M", "6M", "1Y").
-
-    Returns
-    -------
-    plotly.graph_objects.Figure
-        Oppdatert graf.
+    Oppdater aktiv ticker ved radklikk.
+    Klikk på samme rad igjen lukker detaljpanelet (toggle).
     """
-    if not selected_tickers:
-        selected_tickers = []
+    triggered = dash.ctx.triggered_id
+    if not triggered:
+        return current
+    clicked = triggered.get("ticker")
+    return None if clicked == current else clicked
 
-    market_data = load_market_data()
-    return make_chart(market_data, selected_tickers, period)
+
+@callback(
+    Output({"type": "row", "ticker": ALL}, "style"),
+    Input("active-ticker", "data"),
+    Input({"type": "row", "ticker": ALL}, "n_clicks"),  # kun for å hente ticker-rekkefølge
+    prevent_initial_call=False,
+)
+def highlight_active_row(active, _clicks):
+    """
+    Sett bakgrunn på aktiv rad. Alle andre rader er gjennomsiktige.
+    Endrer kun 'background' – layout og grid forblir uendret.
+
+    Vi legger til n_clicks-input bare for å kunne lese tickers via
+    ctx.inputs_list[1], siden outputs_list-formatet varierer mellom
+    Dash-versjoner. inputs_list er stabilt og pålitelig.
+    """
+    # inputs_list[1] = liste av pattern-matched n_clicks-specs.
+    # Hver spec: {"id": {"type": "row", "ticker": <t>}, "property": "n_clicks", ...}
+    tickers = [s["id"]["ticker"] for s in dash.ctx.inputs_list[1]]
+    base_style = {
+        "display": "grid",
+        "gridTemplateColumns": "28px 1fr 110px 120px",
+        "alignItems": "center",
+        "padding": "11px 20px",
+        "cursor": "pointer",
+        "gap": "0 8px",
+        "borderBottom": f"1px solid {C['divider']}",
+        "transition": "background 0.12s",
+    }
+    return [
+        {**base_style, "background": C["row_active"] if t == active else "transparent"}
+        for t in tickers
+    ]
+
+
+@callback(
+    Output("detail-panel", "style"),
+    Output("detail-title",  "children"),
+    Output("detail-graph",  "figure"),
+    Input("active-ticker",  "data"),
+    Input("detail-period",  "value"),
+    prevent_initial_call=False,
+)
+def update_detail_panel(active, period):
+    """
+    Vis eller skjul detaljpanelet og oppdater sparkline-grafen.
+
+    Kalles både når aktiv ticker endres og når perioden endres.
+    Panelet vises kun når en ticker er valgt (active is not None).
+    """
+    panel_style = {
+        "background": C["row_active"],
+        "border": f"1px solid {C['border']}",
+        "borderTop": "none",
+        "borderRadius": "0 0 12px 12px",
+        "padding": "16px 20px",
+        "marginBottom": "28px",
+    }
+
+    if not active:
+        return {**panel_style, "display": "none"}, "", go.Figure()
+
+    market_data    = load_market_data()
+    data_by_ticker = {e["ticker"]: e for e in market_data}
+
+    if active not in data_by_ticker:
+        return {**panel_style, "display": "none"}, "", go.Figure()
+
+    entry = data_by_ticker[active]
+    last  = entry["series"][-1]
+    chg   = last["change_pct"]
+    sign  = "+" if chg > 0 else ""
+    col   = C["pos"] if chg > 0 else C["neg"]
+
+    title = html.Div([
+        html.Span(entry["label"],
+                  style={"fontWeight": "700", "marginRight": "10px"}),
+        html.Span(f"{last['value']:,.2f}",
+                  style={"marginRight": "10px", "fontVariantNumeric": "tabular-nums"}),
+        html.Span(f"{sign}{chg:.2f}%", style={"color": col, "fontWeight": "600"}),
+    ])
+
+    return {**panel_style, "display": "block"}, title, make_sparkline(entry, period)
+
+
+@callback(
+    Output("compare-chart", "figure"),
+    Input("compare-dropdown", "value"),
+    Input("compare-period",   "value"),
+    prevent_initial_call=True,
+)
+def update_compare_chart(selected, period):
+    """Oppdater sammenlign-grafen ved valg av ticker eller periode."""
+    return make_comparison_chart(load_market_data(), selected or [], period)
 
 
 # ---------------------------------------------------------------------------
-# Start scheduler (kjøres både ved direkte kjøring og via gunicorn)
+# Start
 # ---------------------------------------------------------------------------
-# Vi starter scheduleren her på modulnivå, ikke bare i __main__-blokken.
-# Årsak: gunicorn importerer app.py som et modul (kaller ikke __main__),
-# så alt som kun lå i if __name__ == "__main__": ble aldri kjørt på Railway.
-# Med --workers 1 i Procfile er det kun én worker-prosess, så scheduleren
-# startes kun én gang – ingen risiko for dupliserte jobber.
 sched.start()
-
-# Sørg for at data/store/-mappen eksisterer på Railway (ephemeral filesystem)
 Path("data/store").mkdir(parents=True, exist_ok=True)
 
 if __name__ == "__main__":
