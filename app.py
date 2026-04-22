@@ -257,15 +257,11 @@ def ticker_row(entry: dict) -> html.Div:
     return html.Div(
         id={"type": "row", "ticker": t},
         n_clicks=0,
+        # className="ticker-row" gir grid-kolonnene; media queries i style.css
+        # kan overstyre disse på smale skjermer (inline styles kan ikke det).
+        className="ticker-row",
         style={
-            "display": "grid",
-            "gridTemplateColumns": "28px 1fr 110px 120px",
-            "alignItems": "center",
-            "padding": "11px 20px",
-            "cursor": "pointer",
-            "gap": "0 8px",
             "borderBottom": f"1px solid {C['divider']}",
-            "transition": "background 0.12s",
         },
         children=[
             html.Span(flag, style={"fontSize": "15px"}),
@@ -282,7 +278,9 @@ def ticker_row(entry: dict) -> html.Div:
             html.Div([
                 html.Span(f"{arr} {sign}{chg:.2f}%",
                           style={"fontSize": "13px", "fontWeight": "600", "color": col}),
+                # className="change-abs": skjules på < 480px via style.css
                 html.Span(f"  {sign}{abs_:.2f}",
+                          className="change-abs",
                           style={"fontSize": "11px", "color": C["muted"]}),
             ], style={"textAlign": "right"}),
         ],
@@ -380,11 +378,9 @@ def build_layout() -> html.Div:
                "fontFamily": "Inter, system-ui, sans-serif", "color": C["text"]},
         children=[
             # ── Header ────────────────────────────────────────────────────
-            html.Div(style={
+            # className="site-header" – flex-wrap og padding styres av style.css
+            html.Div(className="site-header", style={
                 "borderBottom": f"1px solid {C['border']}",
-                "padding": "20px 32px",
-                "display": "flex", "justifyContent": "space-between",
-                "alignItems": "center",
             }, children=[
                 html.Div([
                     html.H1("Macro Dashboard", style={
@@ -399,19 +395,15 @@ def build_layout() -> html.Div:
             ]),
 
             # ── Hovedinnhold ──────────────────────────────────────────────
-            html.Div(style={"padding": "24px 32px", "maxWidth": "1280px"}, children=[
+            # className="main-content" brukes av style.css for responsiv padding.
+            html.Div(className="main-content", children=[
 
                 # ── To-kolonne: tabell | detaljgraf ───────────────────────
-                # CSS grid med to like brede kolonner og 24px gap mellom.
-                # Høyre kolonne er sticky slik at grafen alltid er synlig
-                # selv om tabellen er lang nok til å scrolle.
-                html.Div(style={
-                    "display": "grid",
-                    "gridTemplateColumns": "1fr 1fr",
-                    "gap": "0 24px",
-                    "alignItems": "start",
-                    "marginBottom": "32px",
-                }, children=[
+                # className="main-grid": to kolonner på ≥800px, én på <800px.
+                # Selve grid-stilene (display/columns/gap) ligger i style.css
+                # slik at media queries kan overstyre dem – inline styles kan
+                # ikke overrides av media queries.
+                html.Div(className="main-grid", children=[
 
                     # ── Venstre: indekstabell ─────────────────────────────
                     html.Div(
@@ -422,19 +414,19 @@ def build_layout() -> html.Div:
                         children=rows,
                     ),
 
-                    # ── Høyre: detaljpanel (alltid synlig, sticky) ─────────
-                    # Panelet er alltid i DOM og alltid synlig – ingen
-                    # show/hide-logikk. Callbacks oppdaterer kun tittel og
-                    # graf-figur, ikke selve panel-stilen.
+                    # ── Høyre: detaljgraf (alltid synlig) ──────────────────
+                    # className="detail-panel-col": sticky på desktop, relativt
+                    # på mobil (se style.css). Ingen show/hide – panelet er
+                    # alltid i DOM. Callbacks oppdaterer kun tittel og figur.
                     html.Div(
                         id="detail-panel",
+                        className="detail-panel-col",
                         style={
                             "background": C["card"],
                             "border": f"1px solid {C['border']}",
                             "borderRadius": "12px",
                             "padding": "20px",
-                            "position": "sticky",
-                            "top": "24px",          # sticky-offset fra toppen av viewport
+                            # position og top settes av style.css / media query
                         },
                         children=[
                             # Tittellinje: label + kurs + daglig endring
@@ -580,18 +572,14 @@ def highlight_active_row(active, _clicks):
     # inputs_list[1] = liste av pattern-matched n_clicks-specs.
     # Hver spec: {"id": {"type": "row", "ticker": <t>}, "property": "n_clicks", ...}
     tickers = [s["id"]["ticker"] for s in dash.ctx.inputs_list[1]]
-    base_style = {
-        "display": "grid",
-        "gridTemplateColumns": "28px 1fr 110px 120px",
-        "alignItems": "center",
-        "padding": "11px 20px",
-        "cursor": "pointer",
-        "gap": "0 8px",
-        "borderBottom": f"1px solid {C['divider']}",
-        "transition": "background 0.12s",
-    }
+
+    # Vi setter kun background her – grid-layout og padding bor i className
+    # "ticker-row" (style.css) og kan dermed overstyres av media queries.
     return [
-        {**base_style, "background": C["row_active"] if t == active else "transparent"}
+        {
+            "borderBottom": f"1px solid {C['divider']}",
+            "background": C["row_active"] if t == active else "transparent",
+        }
         for t in tickers
     ]
 

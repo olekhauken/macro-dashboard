@@ -1,0 +1,130 @@
+/*
+  assets/style.css
+  ================
+  Responsivt CSS for Macro Dashboard.
+
+  Viktig: box-sizing: border-box sørger for at padding ikke legges
+  til bredden – uten dette kan divs med padding overskride viewport-
+  bredden på mobil.
+*/
+
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+body {
+    overflow-x: hidden;   /* forhindrer horisontal scrolling */
+    margin: 0;
+}
+
+/*
+  assets/style.css (fortsettelse)
+
+  Dash serverer automatisk alle filer i assets/-mappen som statiske
+  ressurser, så denne filen lastes inn på alle sider uten noe ekstra
+  konfigurasjon i app.py.
+
+  Breakpoints:
+    ≥ 800px  – to kolonner (tabell | graf) side om side
+    < 800px  – én kolonne, graf under tabell (mobil/nettbrett stående)
+    < 480px  – komprimerte tabellrader og mindre padding
+*/
+
+/* ── To-kolonne grid ──────────────────────────────────────────── */
+.main-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 24px;
+    align-items: start;
+    margin-bottom: 32px;
+}
+
+/* Høyre kolonne (detaljgraf) – sticky på desktop */
+.detail-panel-col {
+    position: sticky;
+    top: 24px;
+}
+
+/* ── Responsiv tabell-rad ─────────────────────────────────────── */
+/* Disse klassene samsvarer med ticker_row() i app.py */
+.ticker-row {
+    display: grid !important;
+    grid-template-columns: 28px 1fr 110px 120px;
+    align-items: center;
+    padding: 11px 20px;
+    cursor: pointer;
+    gap: 0 8px;
+    transition: background 0.12s;
+}
+
+/* ── Padding på hovedinnholdet ────────────────────────────────── */
+.main-content {
+    padding: 24px 32px;
+    max-width: 1280px;
+    width: 100%;            /* clamp til container-bredden */
+    box-sizing: border-box;
+}
+
+/* ── Header: stables på mobil ─────────────────────────────────── */
+.site-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;          /* tillater linjeskift */
+    gap: 4px 16px;
+    padding: 20px 32px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* ── Mobil: < 800px ───────────────────────────────────────────── */
+@media (max-width: 800px) {
+
+    /* Stable kolonnene vertikalt */
+    .main-grid {
+        grid-template-columns: 1fr;
+        gap: 16px 0;
+    }
+
+    /* Fjern sticky på mobil – sticky i én kolonne gir ingen mening
+       og kan forårsake at grafen klistrer seg til toppen mens
+       brukeren scroller nedover tabellen. */
+    .detail-panel-col {
+        position: relative;
+        top: auto;
+    }
+
+    /* Litt tettere padding */
+    .main-content {
+        padding: 16px;
+    }
+
+    /* Header: la "Oppdatert"-teksten falle ned på ny linje */
+    .site-header {
+        padding: 16px;
+    }
+}
+
+/* ── Veldig smal mobil: < 480px ──────────────────────────────── */
+@media (max-width: 480px) {
+
+    /* Smalere kurs-kolonner; absolutt endring (+X.XX) skjules */
+    .ticker-row {
+        grid-template-columns: 22px 1fr 90px 80px;
+        padding: 10px 12px;
+        gap: 0 4px;
+    }
+
+    /* Skjul absolutt endring (f.eks. +6.30) – vises bare i detaljpanelet */
+    .change-abs {
+        display: none;
+    }
+
+    .main-content {
+        padding: 12px;
+    }
+
+    .site-header {
+        padding: 12px;
+    }
+}
