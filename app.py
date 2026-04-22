@@ -140,12 +140,32 @@ def make_sparkline(entry: dict, period: str = "3M") -> go.Figure:
     ))
     fig.update_layout(
         paper_bgcolor=C["row_active"], plot_bgcolor=C["row_active"],
-        margin=dict(l=48, r=16, t=8, b=28), height=180,
+        margin=dict(l=48, r=16, t=8, b=28), height=300,
         xaxis=dict(showgrid=False, zeroline=False,
                    tickfont=dict(size=10, color=C["muted"])),
         yaxis=dict(showgrid=True, gridcolor=C["divider"], zeroline=False,
                    tickfont=dict(size=10, color=C["muted"]), side="right"),
         hovermode="x unified", showlegend=False,
+    )
+    return fig
+
+
+def make_placeholder_fig() -> go.Figure:
+    """
+    Tom plassholdergraf vist i høyre panel før brukeren har klikket en rad.
+    Viser en sentrert tekst-hint i stedet for en tom hvit boks.
+    """
+    fig = go.Figure()
+    fig.add_annotation(
+        text="← Klikk på en indeks for å se grafen",
+        xref="paper", yref="paper", x=0.5, y=0.5,
+        showarrow=False,
+        font=dict(size=13, color=C["muted"]),
+    )
+    fig.update_layout(
+        paper_bgcolor=C["card"], plot_bgcolor=C["card"],
+        margin=dict(l=0, r=0, t=0, b=0), height=300,
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
     )
     return fig
 
@@ -294,6 +314,16 @@ def build_layout() -> html.Div:
     """
     Bygg hele layout. Kalles ved hver sideinnlasting (funksjon, ikke objekt)
     slik at market.json alltid leses fersk.
+
+    Layout-struktur:
+    ┌─────────────────────────────────────────────────────┐
+    │  Header                                             │
+    ├────────────────────────┬────────────────────────────┤
+    │  Indekstabell (venstre)│  Detaljgraf (høyre, sticky)│
+    │  – klikkbare rader     │  – oppdateres ved klikk    │
+    ├────────────────────────┴────────────────────────────┤
+    │  Sammenlign-seksjon (full bredde)                   │
+    └─────────────────────────────────────────────────────┘
     """
     market_data    = load_market_data()
     data_by_ticker = {e["ticker"]: e for e in market_data}
@@ -301,14 +331,20 @@ def build_layout() -> html.Div:
     ts = market_data[0].get("last_updated", "")[:16].replace("T", " ") + " UTC" \
          if market_data else ""
 
-    # Standard valg for sammenlign-grafen
+    # Standardvalg: vis OBX eller første tilgjengelige ticker ved oppstart
+    default_active = next(
+        (t for t in ["OBX.OL", "^GSPC"] if t in data_by_ticker),
+        market_data[0]["ticker"] if market_data else None,
+    )
+
+    # Sammenlign-graf: standard tre indekser
     default_compare = [t for t in ["^GSPC", "OBX.OL", "^IXIC"]
                        if t in data_by_ticker] or \
                       ([market_data[0]["ticker"]] if market_data else [])
     dropdown_opts = [{"label": e["label"], "value": e["ticker"]}
                      for e in market_data]
 
-    # Bygg radene gruppert per seksjon
+    # Bygg tabellrader gruppert per seksjon
     rows: list = [table_header()]
     for sec in SECTION_ORDER:
         entries = [e for e in market_data
@@ -320,6 +356,24 @@ def build_layout() -> html.Div:
             rows.append(ticker_row(e))
 
     period_btn = lambda val: {"label": val, "value": val}   # noqa: E731
+
+    # Forhåndsvis detaljer for standardvalgt ticker (siden vi setter data=default_active)
+    default_entry  = data_by_ticker.get(default_active)
+    default_fig    = make_sparkline(default_entry, "3M") if default_entry else make_placeholder_fig()
+    if default_entry:
+        last = default_entry["series"][-1]
+        chg  = last["change_pct"]
+        sign = "+" if chg > 0 else ""
+        col  = C["pos"] if chg > 0 else C["neg"]
+        default_title = html.Div([
+            html.Span(default_entry["label"],
+                      style={"fontWeight": "700", "marginRight": "10px"}),
+            html.Span(f"{last['value']:,.2f}",
+                      style={"marginRight": "10px", "fontVariantNumeric": "tabular-nums"}),
+            html.Span(f"{sign}{chg:.2f}%", style={"color": col, "fontWeight": "600"}),
+        ])
+    else:
+        default_title = ""
 
     return html.Div(
         style={"background": C["bg"], "minHeight": "100vh",
@@ -344,59 +398,82 @@ def build_layout() -> html.Div:
                          style={"fontSize": "12px", "color": C["muted"]}),
             ]),
 
-            # ── Innhold ───────────────────────────────────────────────────
-            html.Div(style={"padding": "24px 32px", "maxWidth": "900px"}, children=[
+            # ── Hovedinnhold ──────────────────────────────────────────────
+            html.Div(style={"padding": "24px 32px", "maxWidth": "1280px"}, children=[
 
-                # Indekstabell
-                html.Div(
-                    id="index-table",
-                    style={"background": C["card"], "border": f"1px solid {C['border']}",
-                           "borderRadius": "12px", "overflow": "hidden",
-                           "marginBottom": "0"},
-                    children=rows,
-                ),
+                # ── To-kolonne: tabell | detaljgraf ───────────────────────
+                # CSS grid med to like brede kolonner og 24px gap mellom.
+                # Høyre kolonne er sticky slik at grafen alltid er synlig
+                # selv om tabellen er lang nok til å scrolle.
+                html.Div(style={
+                    "display": "grid",
+                    "gridTemplateColumns": "1fr 1fr",
+                    "gap": "0 24px",
+                    "alignItems": "start",
+                    "marginBottom": "32px",
+                }, children=[
 
-                # Detaljpanel – alltid i DOM, vises/skjules via callback
-                html.Div(
-                    id="detail-panel",
-                    style={"background": C["row_active"],
-                           "border": f"1px solid {C['border']}",
-                           "borderTop": "none",
-                           "borderRadius": "0 0 12px 12px",
-                           "padding": "16px 20px",
-                           "display": "none",       # skjult til rad klikkes
-                           "marginBottom": "28px"},
-                    children=[
-                        html.Div(id="detail-title", style={
-                            "fontSize": "13px", "fontWeight": "600",
-                            "color": C["text"], "marginBottom": "10px",
-                        }),
-                        dcc.RadioItems(
-                            id="detail-period",
-                            options=[period_btn(k) for k in PERIOD_DAYS],
-                            value="3M",
-                            inline=True,
-                            inputStyle={"display": "none"},
-                            labelStyle={
-                                "display": "inline-block",
-                                "padding": "3px 10px", "marginRight": "4px",
-                                "borderRadius": "4px",
-                                "border": f"1px solid {C['border']}",
-                                "cursor": "pointer", "fontSize": "11px",
-                                "fontWeight": "600", "color": C["muted"],
-                            },
-                            style={"marginBottom": "8px"},
-                        ),
-                        dcc.Graph(
-                            id="detail-graph",
-                            figure=go.Figure(),
-                            config={"displayModeBar": False},
-                            style={"height": "180px"},
-                        ),
-                    ],
-                ),
+                    # ── Venstre: indekstabell ─────────────────────────────
+                    html.Div(
+                        id="index-table",
+                        style={"background": C["card"],
+                               "border": f"1px solid {C['border']}",
+                               "borderRadius": "12px", "overflow": "hidden"},
+                        children=rows,
+                    ),
 
-                # Sammenlign-seksjon
+                    # ── Høyre: detaljpanel (alltid synlig, sticky) ─────────
+                    # Panelet er alltid i DOM og alltid synlig – ingen
+                    # show/hide-logikk. Callbacks oppdaterer kun tittel og
+                    # graf-figur, ikke selve panel-stilen.
+                    html.Div(
+                        id="detail-panel",
+                        style={
+                            "background": C["card"],
+                            "border": f"1px solid {C['border']}",
+                            "borderRadius": "12px",
+                            "padding": "20px",
+                            "position": "sticky",
+                            "top": "24px",          # sticky-offset fra toppen av viewport
+                        },
+                        children=[
+                            # Tittellinje: label + kurs + daglig endring
+                            html.Div(id="detail-title",
+                                     children=default_title,
+                                     style={
+                                         "fontSize": "14px", "fontWeight": "600",
+                                         "color": C["text"], "marginBottom": "14px",
+                                         "minHeight": "20px",
+                                     }),
+                            # Periodvelger
+                            dcc.RadioItems(
+                                id="detail-period",
+                                options=[period_btn(k) for k in PERIOD_DAYS],
+                                value="3M",
+                                inline=True,
+                                inputStyle={"display": "none"},
+                                labelStyle={
+                                    "display": "inline-block",
+                                    "padding": "4px 12px", "marginRight": "4px",
+                                    "borderRadius": "5px",
+                                    "border": f"1px solid {C['border']}",
+                                    "cursor": "pointer", "fontSize": "11px",
+                                    "fontWeight": "600", "color": C["muted"],
+                                },
+                                style={"marginBottom": "12px"},
+                            ),
+                            # Sparkline-graf
+                            dcc.Graph(
+                                id="detail-graph",
+                                figure=default_fig,
+                                config={"displayModeBar": False},
+                                style={"height": "300px"},
+                            ),
+                        ],
+                    ),
+                ]),
+
+                # ── Sammenlign-seksjon (full bredde under to-kolonne) ──────
                 html.Div("📈  SAMMENLIGN INDEKSER", style={
                     "fontSize": "11px", "fontWeight": "700", "color": C["muted"],
                     "letterSpacing": "0.1em", "textTransform": "uppercase",
@@ -453,8 +530,9 @@ def build_layout() -> html.Div:
                 ),
             ]),
 
-            # State
-            dcc.Store(id="active-ticker", data=None),
+            # ── State ─────────────────────────────────────────────────────
+            # Sett default_active slik at grafen vises med en gang på oppstart
+            dcc.Store(id="active-ticker", data=default_active),
             dcc.Interval(id="refresh-interval", interval=5*60*1000, n_intervals=0),
         ],
     )
@@ -519,37 +597,29 @@ def highlight_active_row(active, _clicks):
 
 
 @callback(
-    Output("detail-panel", "style"),
-    Output("detail-title",  "children"),
-    Output("detail-graph",  "figure"),
-    Input("active-ticker",  "data"),
-    Input("detail-period",  "value"),
+    Output("detail-title", "children"),
+    Output("detail-graph", "figure"),
+    Input("active-ticker", "data"),
+    Input("detail-period", "value"),
     prevent_initial_call=False,
 )
 def update_detail_panel(active, period):
     """
-    Vis eller skjul detaljpanelet og oppdater sparkline-grafen.
+    Oppdater tittel og sparkline-graf i høyre detaljpanel.
 
-    Kalles både når aktiv ticker endres og når perioden endres.
-    Panelet vises kun når en ticker er valgt (active is not None).
+    Panelet er alltid synlig (to-kolonne-layout) – vi trenger ikke
+    lenger å vise/skjule det. Kalles ved radklikk og periodbytte.
+
+    Hvis ingen ticker er valgt: vis plassholder-figur.
     """
-    panel_style = {
-        "background": C["row_active"],
-        "border": f"1px solid {C['border']}",
-        "borderTop": "none",
-        "borderRadius": "0 0 12px 12px",
-        "padding": "16px 20px",
-        "marginBottom": "28px",
-    }
-
     if not active:
-        return {**panel_style, "display": "none"}, "", go.Figure()
+        return "", make_placeholder_fig()
 
     market_data    = load_market_data()
     data_by_ticker = {e["ticker"]: e for e in market_data}
 
     if active not in data_by_ticker:
-        return {**panel_style, "display": "none"}, "", go.Figure()
+        return "", make_placeholder_fig()
 
     entry = data_by_ticker[active]
     last  = entry["series"][-1]
@@ -565,7 +635,7 @@ def update_detail_panel(active, period):
         html.Span(f"{sign}{chg:.2f}%", style={"color": col, "fontWeight": "600"}),
     ])
 
-    return {**panel_style, "display": "block"}, title, make_sparkline(entry, period)
+    return title, make_sparkline(entry, period)
 
 
 @callback(
