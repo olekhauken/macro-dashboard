@@ -29,6 +29,10 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np   # noqa: F401 – pre-import før scheduler-tråd
+import pandas as pd  # noqa: F401 – pre-import før scheduler-tråd
+# Pandas må importeres i main-tråden FØR scheduler-tråden starter.
+# Ellers kan Plotly treffe pandas mens den fortsatt er delvis initialisert
+# (circular import-feil: 'partially initialized module pandas has no attribute Series').
 import dash
 from dash import ALL, Input, Output, State, callback, dcc, html
 import plotly.graph_objects as go
