@@ -11,5 +11,5 @@ apscheduler==3.10.4        # Advanced Python Scheduler – runs daily data-fetch
 # Data processing
 pandas==2.2.3              # DataFrame library – all data manipulation goes through here
 
-# Web server (for Railway deployment)
+# Web server (produksjon – Render/Railway/gunicorn)
 gunicorn==23.0.0           # Production WSGI server (Dash runs on Flask under the hood)
