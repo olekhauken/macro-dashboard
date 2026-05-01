@@ -324,10 +324,45 @@ def build_layout() -> html.Div:
     └─────────────────────────────────────────────────────┘
     """
     market_data    = load_market_data()
+
+    # ── Ingen data ennå: vis enkel ventemelding ──────────────────────────
+    # Skjer ved første oppstart (market.json finnes ikke ennå).
+    # Vi returnerer en layout UTEN pattern-matched komponenter – ellers
+    # vil Dash-callbacks med ALL-input krasje fordi det ikke finnes noen
+    # matching IDs. dcc.Interval sørger for at siden lastes på nytt hvert
+    # 10. sekund inntil dataen er klar.
+    if not market_data:
+        return html.Div(style={
+            "background": C["bg"], "minHeight": "100vh",
+            "fontFamily": "Inter, system-ui, sans-serif", "color": C["text"],
+            "display": "flex", "flexDirection": "column",
+            "alignItems": "center", "justifyContent": "center", "gap": "16px",
+        }, children=[
+            html.H1("Macro Dashboard", style={
+                "margin": "0", "fontSize": "24px", "fontWeight": "700",
+            }),
+            html.P("Henter markedsdata, vennligst vent…",
+                   style={"color": C["muted"], "fontSize": "14px", "margin": "0"}),
+            html.P("Siden lastes automatisk på nytt.",
+                   style={"color": C["muted"], "fontSize": "12px", "margin": "0"}),
+            # Automatisk refresh hvert 10. sekund til data er tilgjengelig
+            dcc.Interval(id="refresh-interval", interval=10_000, n_intervals=0),
+            dcc.Store(id="active-ticker", data=None),
+            # Dummy-komponenter for at callback-registreringen ikke krasjer
+            html.Div(id="detail-panel", style={"display": "none"}),
+            html.Div(id="detail-title", style={"display": "none"}),
+            html.Div(id="detail-period", style={"display": "none"}),
+            dcc.Graph(id="detail-graph",  style={"display": "none"},
+                      figure=go.Figure()),
+            dcc.Graph(id="compare-chart", style={"display": "none"},
+                      figure=go.Figure()),
+            dcc.Dropdown(id="compare-dropdown", style={"display": "none"}),
+            dcc.RadioItems(id="compare-period", style={"display": "none"}),
+        ])
+
     data_by_ticker = {e["ticker"]: e for e in market_data}
 
-    ts = market_data[0].get("last_updated", "")[:16].replace("T", " ") + " UTC" \
-         if market_data else ""
+    ts = market_data[0].get("last_updated", "")[:16].replace("T", " ") + " UTC"
 
     # Standardvalg: vis OBX eller første tilgjengelige ticker ved oppstart
     default_active = next(
