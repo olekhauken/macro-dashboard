@@ -2,31 +2,15 @@
 # ===========
 # Konfigurasjon for Render.com-deployment.
 #
-# Render leser denne filen automatisk når du kobler GitHub-repoet.
-# Tilsvarer railway.json – same startCommand, same gunicorn-oppsett.
-#
-# Gratis-tier merknad:
-#   - Appen "sover" etter 15 min uten trafikk (kald oppstart ~30 sek)
-#   - Filsystemet er flyktig: market.json re-fetches automatisk ved oppstart
-#     via startup-tråden i scheduler.py – ingen manuell handling nødvendig
+# runtime: docker – Render bruker Dockerfile for å bygge og kjøre appen.
+# Dette gir full kontroll over Python-versjonen (3.11.9 i Dockerfile)
+# og unngår at Render velger feil standard-versjon automatisk.
 
 services:
   - type: web
     name: macro-dashboard
-    runtime: python
+    runtime: docker
     plan: free
-
-    # Kjøres én gang ved deploy – installer avhengigheter
-    buildCommand: pip install -r requirements.txt
-
-    # Starter gunicorn på porten Render tildeler via $PORT
-    # --workers 1   : én worker passer for gratis-tier (begrenset RAM)
-    # --timeout 120 : gir tid til oppstart-fetch av markedsdata
-    startCommand: gunicorn app:server --bind 0.0.0.0:$PORT --workers 1 --timeout 120
 
     # Render sjekker denne stien for å bekrefte at appen er oppe
     healthCheckPath: /
-
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.9"
